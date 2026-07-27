@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>热血乌龙球 - 文件控制版</title>
+<style>
+*{
+  margin:0;
+  padding:0;
+  box-sizing:border-box;
+}
+body{
+  background:#222;
+  display:flex;
+  justify-content:center;
+  align-items:flex-start;
+  padding-top:18px;
+}
+#gameCanvas{
+  border:4px solid #111;
+  background:#58b957;
+  cursor: none;
+}
+#signalStatus{
+  position:fixed;
+  top:10px;
+  right:10px;
+  background:rgba(0,0,0,0.7);
+  color:#0f0;
+  font-family:monospace;
+  font-size:14px;
+  padding:6px 10px;
+  border-radius:4px;
+  z-index:999;
+}
+</style>
+</head>
+<body>
+<div id="signalStatus">等待信号连接...</div>
+<canvas id="gameCanvas" width="1200" height="600"></canvas>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const signalStatusEl = document.getElementById('signalStatus');
+
+const GRAVITY = 0.55;
+const GROUND_Y = 460;
+
+let game = {
+  time:90,
+  scoreP1:0,
+  scoreP2:0,
+  over:false,
+  lastTime:Date.now(),
+  goalCelebration:0,
+  goalScorer:"",
+  confetti:[]
+};
+
+// ===== 文件控制信号（替代Z键） =====
+let fileSignal = 0;       // 0 或 1，来自 movda.txt
+let fileSignalReady = false;
+
+// 每 50ms 轮询一次信号文件（通过本地服务器代理）
+async function pollSignal(){
+  try{
+    const res = await fetch('/signal?t=' + Date.now(), {cache:'no-store'});
+    if(res.ok){
+      const text = await res.text();
+      const trimmed = text.trim();
+      // 取最后一个非空字符
+      const lastChar = trimmed.charAt(trimmed.length - 1);
+      const val = parseInt(lastChar, 10);
+      if(!isNaN(val) && (val === 0 || val === 1)){
+        fileSignal = val;
+        fileSignalReady = true;
+        signalStatusEl.textContent = '信号已连接 | Z键模拟: ' + (val===1?'按下':'松开');
+        signalStatusEl.style.color = val===1 ? '#ff5555' : '#0f0';
+      }
+    }
+  }catch(e){
+    signalStatusEl.textContent = '等待信号连接... (服务器未启动?)';
+    signalStatusEl.style.color = '#ffaa00';
+  }
+}
+setInterval(pollSignal, 50);  // 20Hz 轮询
+
+// 鼠标状态：红方
+let mouseState = {
+  left: false,
+  right: false
+};
+
+// 红方玩家
+const p1 = {
+  x:180,
+  y:GROUND_Y,
+  w:36,
+  h:52,
+  vx:0,
+  vy:0,
+  speed:5,
+  onGround:true,
+  color:'#dd2222',
+  legFrame:0,
+  legTimer:0,
+  kickCooldown:0
+};
+
+// 黄方玩家
+const p2 = {
+  x:1000,
+  y:GROUND_Y,
+  w:36,
+  h:52,
+  vx:0,
+  vy:0,
+  speed:5,
+  onGround:true,
+  color:'#e6c220',
+  legFrame:0,
+  legTimer:0,
+  kickCooldown:0
+};
+
+const ball = {
+  x:600,
+  y:280,
+  r:20,
+  vx:0,
+  vy:0
+};
+
+const goalLeft = {x:20,y:380,w:35,h:180,team:'red'};
+const goalRight = {x:1145,y:380,w:35,h:180,team:'yellow'};
+
+// 鼠标监听
+canvas.addEventListener('mousedown', e=>{
+  e.preventDefault();
+  if(e.button === 0) mouseState.left = true;
+  if(e.button === 2) mouseState.right = true;
+});
+canvas.addEventListener('mouseup', e=>{
+  if(e.button === 0) mouseState.left = false;
+  if(e.button === 2) mouseState.right = false;
+});
+canvas.addEventListener('contextmenu', e=>e.preventDefault());
+
+const keys = {};
+document.addEventListener('keydown',e=>{
+  keys[e.code]=true;
+});
+document.addEventListener('keyup',e=>{
+  keys[e.code]=false;
+});
+
+// 像素球员
+function drawPixelPlayer(p){
+  const px = p.x;
+  const py = p.y;
+  const pw = p.w;
+  const ph = p.h;
+
+  ctx.save();
+
+  // 头
+  ctx.fillStyle='#ffdbac';
+  ctx.fillRect(px+8, py, 20, 18);
+
+  // 头发
+  ctx.fillStyle='#4a3828';
+  ctx.fillRect(px+8, py, 20, 6);
+
+  // 眼睛
+  ctx.fillStyle='#000';
+  ctx.fillRect(px+12, py+8, 4, 4);
+  ctx.fillRect(px+20, py+8, 4, 4);
+
+  // 身体
+  ctx.fillStyle=p.color;
+  ctx.fillRect(px+6, py+18, 24, 20);
+
+  // 胸口
+  ctx.fillStyle='#ffffff';
+  ctx.fillRect(px+14, py+22, 8, 8);
+
+  // 手臂
+  ctx.fillStyle='#ffdbac';
+  ctx.fillRect(px+2, py+20, 6, 14);
+  ctx.fillRect(px+28, py+20, 6, 14);
+
+  // 腿
+  ctx.fillStyle='#222';
+  const legOffset = p.onGround && Math.abs(p.vx) > 0.5 ? Math.sin(p.legFrame) * 5 : 0;
+
+  ctx.fillRect(px+8, py+38, 7, 14 + legOffset);
+  ctx.fillRect(px+21, py+38, 7, 14 - legOffset);
+
+  // 鞋子
+  ctx.fillStyle='#111';
+  ctx.fillRect(px+6, py+48 + legOffset, 10, 5);
+  ctx.fillRect(px+20, py+48 - legOffset, 10, 5);
+
+  ctx.restore();
+}
+
+// 细节足球
+function drawBall(){
+  const bx = ball.x;
+  const by = ball.y;
+  const r = ball.r;
+
+  ctx.beginPath();
+  ctx.arc(bx+2, by+2, r, 0, Math.PI*2);
+  ctx.fillStyle='rgba(0,0,0,0.35)';
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.arc(bx, by, r, 0, Math.PI*2);
+  ctx.fillStyle='#ffffff';
+  ctx.fill();
+  ctx.strokeStyle='#000';
+  ctx.lineWidth=2;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(bx, by, r*0.55, 0, Math.PI*2);
+  ctx.strokeStyle='#222';
+  ctx.lineWidth=1.5;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(bx, by - r*0.55);
+  ctx.lineTo(bx + r*0.45, by + r*0.35);
+  ctx.lineTo(bx - r*0.45, by + r*0.35);
+  ctx.closePath();
+  ctx.strokeStyle='#222';
+  ctx.lineWidth=1.2;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(bx - r*0.35, by - r*0.35, r*0.18, 0, Math.PI*2);
+  ctx.fillStyle='rgba(255,255,255,0.85)';
+  ctx.fill();
+}
+
+// 球门
+function drawGoal(goal){
+  const isRed = goal.team === 'red';
+  const frameColor = isRed ? '#ff3333' : '#ffcc00';
+  const netColor = isRed ? 'rgba(255,80,80,0.55)' : 'rgba(255,200,80,0.55)';
+
+  ctx.fillStyle='rgba(0,0,0,0.25)';
+  ctx.fillRect(goal.x+3, goal.y+3, goal.w, goal.h);
+
+  ctx.fillStyle=frameColor;
+  ctx.fillRect(goal.x, goal.y, goal.w, goal.h);
+
+  ctx.fillStyle='rgba(255,255,255,0.45)';
+  ctx.fillRect(goal.x, goal.y, goal.w, 8);
+  ctx.fillRect(goal.x, goal.y, 8, goal.h);
+
+  ctx.strokeStyle=netColor;
+  ctx.lineWidth=1;
+
+  for(let i=0;i<7;i++){
+    ctx.beginPath();
+    ctx.moveTo(goal.x, goal.y + i * 26);
+    ctx.lineTo(goal.x + goal.w, goal.y + i * 26);
+    ctx.stroke();
+  }
+
+  for(let i=0;i<5;i++){
+    ctx.beginPath();
+    ctx.moveTo(goal.x + i * 9, goal.y);
+    ctx.lineTo(goal.x + i * 9, goal.y + goal.h);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle='rgba(0,0,0,0.35)';
+  ctx.fillRect(goal.x, goal.y + goal.h - 12, goal.w, 12);
+
+  ctx.fillStyle='#fff';
+  ctx.fillRect(goal.x + 8, goal.y + 20, 18, 18);
+  ctx.fillStyle=frameColor;
+  ctx.fillRect(goal.x + 11, goal.y + 23, 12, 12);
+}
+
+// 观众席
+function drawCrowd(){
+  const time = Date.now() * 0.003;
+
+  ctx.fillStyle='#1a1a2e';
+  ctx.fillRect(0, 0, canvas.width, 120);
+
+  const gradient = ctx.createLinearGradient(0,0,0,120);
+  gradient.addColorStop(0,'#111');
+  gradient.addColorStop(1,'#1a1a2e');
+  ctx.fillStyle=gradient;
+  ctx.fillRect(0,0,canvas.width,120);
+
+  for(let i=0;i<60;i++){
+    const x = i * 22;
+    const wobble = game.goalCelebration > 0 ? Math.sin(time + i) * 2 : 0;
+    const h = 15 + Math.sin(i) * 5;
+
+    ctx.fillStyle = `hsl(${i*6}, 70%, 45%)`;
+    ctx.fillRect(x + wobble, 90 - h, 18, h);
+
+    ctx.fillStyle='#ffdbac';
+    ctx.fillRect(x + 2 + wobble, 85 - h, 14, 14);
+
+    ctx.fillStyle='#000';
+    ctx.fillRect(x + 4 + wobble, 89 - h, 3, 3);
+    ctx.fillRect(x + 11 + wobble, 89 - h, 3, 3);
+  }
+
+  if(game.goalCelebration > 0){
+    for(let i=0;i<4;i++){
+      const x = i * 280;
+      const wave = Math.sin(time * 2 + i) * 4;
+
+      ctx.fillStyle = `hsl(${i*90}, 100%, 60%)`;
+      ctx.beginPath();
+      ctx.moveTo(x, 40);
+      ctx.lineTo(x + 10 + wave, 30);
+      ctx.lineTo(x + wave, 46);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+}
+
+// 球场地面
+function drawPitch(){
+  ctx.fillStyle='#58b957';
+  ctx.fillRect(0, 120, canvas.width, canvas.height - 120);
+
+  ctx.fillStyle='#499c48';
+  for(let i=0;i<10;i++){
+    ctx.fillRect(i*120, 120, 60, canvas.height - 120);
+  }
+
+  ctx.lineWidth=3;
+  ctx.strokeStyle='#ffffff';
+
+  ctx.beginPath();
+  ctx.moveTo(canvas.width/2, 120);
+  ctx.lineTo(canvas.width/2, canvas.height);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(canvas.width/2, 300, 50, 0, Math.PI*2);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(canvas.width/2, 300, 4, 0, Math.PI*2);
+  ctx.fillStyle='#ffffff';
+  ctx.fill();
+
+  ctx.strokeRect(goalLeft.x - 10, goalLeft.y - 30, 80, goalLeft.h + 30);
+  ctx.strokeRect(goalLeft.x - 5, goalLeft.y + 50, 55, 80);
+  ctx.strokeRect(goalRight.x - 45, goalRight.y - 30, 80, goalRight.h + 30);
+  ctx.strokeRect(goalRight.x - 50, goalRight.y + 50, 55, 80);
+
+  ctx.beginPath();
+  ctx.moveTo(goalLeft.x + goalLeft.w, goalLeft.y);
+  ctx.lineTo(goalLeft.x + goalLeft.w, goalLeft.y + goalLeft.h);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(goalRight.x, goalRight.y);
+  ctx.lineTo(goalRight.x, goalRight.y + goalRight.h);
+  ctx.stroke();
+}
+
+// 彩带
+function updateConfetti(){
+  if(game.goalCelebration > 0){
+    for(let i=0;i<2;i++){
+      game.confetti.push({
+        x: Math.random() * canvas.width,
+        y: Math.random() * 50,
+        vx: (Math.random() - 0.5) * 1.5,
+        vy: Math.random() * 1.2 + 0.8,
+        color: `hsl(${Math.random()*360}, 100%, 60%)`,
+        size: Math.random() * 5 + 2,
+        alpha: 1
+      });
+    }
+  }
+
+  for(let i=game.confetti.length-1;i>=0;i--){
+    const c = game.confetti[i];
+    c.x += c.vx;
+    c.y += c.vy;
+
+    if(c.y > 300){
+      c.alpha -= 0.015;
+    }
+
+    if(c.alpha <= 0 || c.y > canvas.height){
+      game.confetti.splice(i,1);
+    }
+  }
+}
+
+function drawConfetti(){
+  for(const c of game.confetti){
+    ctx.fillStyle=c.color;
+    ctx.globalAlpha=c.alpha;
+    ctx.fillRect(c.x, c.y, c.size, c.size);
+  }
+  ctx.globalAlpha=1;
+}
+
+// 进球文字
+function drawGoalText(){
+  if(game.goalCelebration > 0){
+    const scale = 1 + Math.sin(Date.now() * 0.01) * 0.12;
+
+    ctx.save();
+    ctx.translate(canvas.width/2, 220);
+    ctx.scale(scale, scale);
+
+    ctx.fillStyle='rgba(0,0,0,0.35)';
+    ctx.fillRect(-110, -45, 220, 70);
+
+    if(game.goalScorer === "red"){
+      ctx.fillStyle='#dd2222';
+    }else{
+      ctx.fillStyle='#e6c220';
+    }
+    ctx.font='bold 52px Arial';
+    ctx.textAlign='center';
+    ctx.fillText('进球啦！', 0, 10);
+
+    ctx.restore();
+  }
+}
+
+function rectCircle(rect, circle){
+  let cx = Math.max(rect.x, Math.min(circle.x, rect.x+rect.w));
+  let cy = Math.max(rect.y, Math.min(circle.y, rect.y+rect.h));
+  let dx = circle.x - cx;
+  let dy = circle.y - cy;
+  return dx*dx + dy*dy < circle.r*circle.r;
+}
+
+function playerKick(p, power, targetX){
+  if(p.kickCooldown > 0) return;
+
+  p.kickCooldown = 20;
+
+  const dx = targetX - (p.x + p.w/2);
+  const dy = (GROUND_Y - 80) - (p.y + p.h/2);
+  const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+
+  ball.vx = (dx / dist) * power;
+  ball.vy = (dy / dist) * power - 3;
+}
+
+function triggerGoalCelebration(scorer){
+  game.goalCelebration = 75;
+  game.goalScorer = scorer;
+  game.confetti = [];
+}
+
+function resetBall(){
+  ball.x = 600;
+  ball.y = 280;
+  ball.vx = 0;
+  ball.vy = 0;
+}
+
+function update(){
+  if(game.over) return;
+
+  if(game.goalCelebration > 0){
+    game.goalCelebration--;
+  }
+  updateConfetti();
+
+  // ============ 红方操作 ============
+  // 鼠标左键 = 左移
+  // Z键 OR 文件信号(fileSignal=1) = 右移  ← 关键改动
+  // 鼠标右键 = 跳跃
+  let moveRight = keys['KeyZ'] || (fileSignalReady && fileSignal === 1);
+
+  if(mouseState.left){
+    p1.vx = -p1.speed;
+  }else if(moveRight){
+    p1.vx = p1.speed;
+  }else{
+    p1.vx *= 0.8;
+  }
+  if(mouseState.right && p1.onGround){
+    p1.vy = -13;
+    p1.onGround = false;
+  }
+
+  // ============ 黄方（A左 D右 W跳跃） ============
+  if(keys['KeyA']){
+    p2.vx = -p2.speed;
+  }else if(keys['KeyD']){
+    p2.vx = p2.speed;
+  }else{
+    p2.vx *= 0.8;
+  }
+  if(keys['KeyW'] && p2.onGround){
+    p2.vy = -13;
+    p2.onGround = false;
+  }
+
+  // 红方物理
+  p1.x += p1.vx;
+  p1.y += p1.vy;
+  p1.vy += GRAVITY;
+
+  if(p1.y >= GROUND_Y){
+    p1.y = GROUND_Y;
+    p1.vy = 0;
+    p1.onGround = true;
+  }
+  p1.x = Math.max(30, Math.min(1140, p1.x));
+
+  p1.legTimer++;
+  if(p1.legTimer > 6){
+    p1.legFrame += 0.6;
+    p1.legTimer = 0;
+  }
+  if(p1.kickCooldown > 0) p1.kickCooldown--;
+
+  // 黄方物理
+  p2.x += p2.vx;
+  p2.y += p2.vy;
+  p2.vy += GRAVITY;
+
+  if(p2.y >= GROUND_Y){
+    p2.y = GROUND_Y;
+    p2.vy = 0;
+    p2.onGround = true;
+  }
+  p2.x = Math.max(30, Math.min(1140, p2.x));
+
+  p2.legTimer++;
+  if(p2.legTimer > 7){
+    p2.legFrame += 0.55;
+    p2.legTimer = 0;
+  }
+  if(p2.kickCooldown > 0) p2.kickCooldown--;
+
+  // 足球物理
+  ball.x += ball.vx;
+  ball.y += ball.vy;
+  ball.vy += GRAVITY * 0.85;
+
+  if(ball.x < ball.r){
+    ball.x = ball.r;
+    ball.vx *= -0.88;
+  }
+  if(ball.x > canvas.width - ball.r){
+    ball.x = canvas.width - ball.r;
+    ball.vx *= -0.88;
+  }
+  if(ball.y < ball.r){
+    ball.y = ball.r;
+    ball.vy *= -0.88;
+  }
+  if(ball.y > 560){
+    ball.y = 560;
+    ball.vy *= -0.88;
+  }
+
+  // 球员碰球
+  if(rectCircle(p1, ball)){
+    playerKick(p1, 7.5, goalRight.x + goalRight.w);
+  }
+  if(rectCircle(p2, ball)){
+    playerKick(p2, 7.5, goalLeft.x + goalLeft.w);
+  }
+
+  // 进球判定
+  if(ball.x - ball.r < goalLeft.x + goalLeft.w && ball.y > goalLeft.y && ball.y < goalLeft.y + goalLeft.h){
+    game.scoreP2++;
+    triggerGoalCelebration("yellow");
+    resetBall();
+  }
+
+  if(ball.x + ball.r > goalRight.x && ball.y > goalRight.y && ball.y < goalRight.y + goalRight.h){
+    game.scoreP1++;
+    triggerGoalCelebration("red");
+    resetBall();
+  }
+}
+
+function render(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  drawCrowd();
+  drawPitch();
+  drawGoal(goalLeft);
+  drawGoal(goalRight);
+  drawPixelPlayer(p1);
+  drawPixelPlayer(p2);
+  drawBall();
+  drawConfetti();
+  drawGoalText();
+
+  // UI文字
+  ctx.fillStyle='#fff';
+  ctx.font='bold 36px Arial';
+  ctx.textAlign='center';
+  ctx.fillText(`红方: ${game.scoreP1}  |  黄方: ${game.scoreP2}`, canvas.width/2, 60);
+  ctx.fillText(`剩余时间: ${Math.ceil(game.time)}`, canvas.width/2, 105);
+
+  ctx.font='18px Arial';
+  ctx.fillText('红方:鼠标左键左移｜Z键/文件信号右移｜鼠标右键跳跃 | 黄方:A左/D右/W跳跃 | R重新开始', canvas.width/2, 580);
+
+  // 信号指示灯
+  ctx.fillStyle = fileSignalReady ? (fileSignal===1?'#ff5555':'#55ff55') : '#888';
+  ctx.beginPath();
+  ctx.arc(1180, 30, 8, 0, Math.PI*2);
+  ctx.fill();
+
+  if(game.over){
+    ctx.fillStyle='rgba(0,0,0,0.75)';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    ctx.fillStyle='#fff';
+    ctx.font='bold 64px Arial';
+    ctx.textAlign='center';
+
+    if(game.scoreP1 > game.scoreP2){
+      ctx.fillText('红方获胜！', canvas.width/2, canvas.height/2 - 30);
+    }else if(game.scoreP2 > game.scoreP1){
+      ctx.fillText('黄方获胜！', canvas.width/2, canvas.height/2 - 30);
+    }else{
+      ctx.fillText('平局！', canvas.width/2, canvas.height/2 - 30);
+    }
+
+    ctx.font='24px Arial';
+    ctx.fillText('按 R 重新开始', canvas.width/2, canvas.height/2 + 20);
+  }
+}
+
+setInterval(()=>{
+  if(game.over) return;
+  const now = Date.now();
+  const delta = (now - game.lastTime) / 1000;
+  game.lastTime = now;
+  game.time -= delta;
+  if(game.time <= 0){
+    game.time = 0;
+    game.over = true;
+  }
+},1000);
+
+document.addEventListener('keydown',e=>{
+  if(e.code === 'KeyR' && game.over){
+    game.time = 90;
+    game.scoreP1 = 0;
+    game.scoreP2 = 0;
+    game.over = false;
+    game.lastTime = Date.now();
+    game.goalCelebration = 0;
+    game.goalScorer = "";
+    game.confetti = [];
+    resetBall();
+
+    p1.x = 180;
+    p1.y = GROUND_Y;
+    p1.vx = 0;
+    p1.vy = 0;
+    p1.kickCooldown = 0;
+
+    p2.x = 1000;
+    p2.y = GROUND_Y;
+    p2.vx = 0;
+    p2.vy = 0;
+    p2.kickCooldown = 0;
+  }
+});
+
+function loop(){
+  update();
+  render();
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
